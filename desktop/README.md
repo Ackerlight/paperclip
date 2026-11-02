@@ -25,8 +25,18 @@ npm install                 # Electron + electron-builder
 npm start                   # run against the repo build (needs server/dist-runtime)
 npm run stage               # pnpm build + server runtime bundle + production deps -> stage/
 npx electron-builder --mac dir   # dist/mac-arm64/Paperclip.app
-npm run dist:mac            # signed DMG + ZIP in dist/
+npm run dist:mac            # signed (not notarized) app + ZIP in dist/
+npm run dist:mac:notarized  # adds a DMG and notarization, for distribution only
 ```
+
+## Models from ModelControl
+
+On each launch the app reads `desktop-settings.json` in the data folder (Paperclip
+› Edit Model Settings…) and hands the listed ModelControl models to Paperclip's
+OpenCode agents as `modelcontrol/<id>`. ModelControl must be running and Online
+at `http://127.0.0.1:8800/v1`; context sizes come from its `/v1/models`
+(8192 when it reports none). Restart the server after editing the file. Codex
+agents can't use ModelControl until it serves `/v1/responses`.
 
 `node scripts/stage.mjs --skip-build` re-stages from the existing build output.
 The server runs on Electron's own Node (`ELECTRON_RUN_AS_NODE`), so the app

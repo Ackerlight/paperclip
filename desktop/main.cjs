@@ -27,6 +27,26 @@ const PAPERCLIP_HOME = path.join(DATA_DIR, "home");
 const LOG_DIR = path.join(DATA_DIR, "logs");
 const SERVER_LOG = path.join(LOG_DIR, "server.log");
 const SECRETS_FILE = path.join(DATA_DIR, "desktop-secrets.json");
+const SETTINGS_FILE = path.join(DATA_DIR, "desktop-settings.json");
+
+// ModelControl (local hub at :8800) serves local GGUF and OpenRouter models over an
+// OpenAI-compatible API. Its tool-capable starter set; edit desktop-settings.json to change.
+const DEFAULT_SETTINGS = {
+  modelControl: {
+    enabled: true,
+    baseUrl: "http://127.0.0.1:8800/v1",
+    // Empty while ModelControl's require_token_local is off; otherwise an mcc_ client grant.
+    token: "",
+    models: [
+      "qwen3-coder-30b-a3b-instruct-q4_k_m",
+      "qwen2.5-coder:14b",
+      "gpt-oss-20b-mxfp4",
+      "openrouter/anthropic/claude-sonnet-4.5",
+    ],
+  },
+};
+// ModelControl serves models whose native window it could not parse at this size.
+const MODELCONTROL_DEFAULT_CONTEXT = 8192;
 
 let mainWindow = null;
 let server = null;
@@ -56,6 +76,63 @@ function loadSecrets() {
     fs.writeFileSync(SECRETS_FILE, JSON.stringify(secrets, null, 2), { mode: 0o600 });
     return secrets;
   }
+}
+
+function loadSettings() {
+  try {
+    return JSON.parse(fs.readFileSync(SETTINGS_FILE, "utf8"));
+  } catch {
+    fs.mkdirSync(DATA_DIR, { recursive: true });
+    fs.writeFileSync(SETTINGS_FILE, JSON.stringify(DEFAULT_SETTINGS, null, 2));
+    return DEFAULT_SETTINGS;
+  }
+}
+
+function fetchJson(url, headers, timeoutMs = 3000) {
+  return new Promise((resolve) => {
+    const req = http.get(url, { headers, timeout: timeoutMs }, (res) => {
+      let body = "";
+      res.setEncoding("utf8");
+      res.on("data", (chunk) => (body += chunk));
+      res.on("end", () => {
+        try {
+          resolve(res.statusCode === 200 ? JSON.parse(body) : null);
+        } catch {
+          resolve(null);
+        }
+      });
+    });
+    req.on("error", () => resolve(null));
+    req.on("timeout", () => {
+      req.destroy();
+      resolve(null);
+    });
+  });
+}
+
+// OpenCode agents pick these up as "modelcontrol/<id>" (PAPERCLIP_OPENCODE_PROVIDERS).
+// Context sizes come from ModelControl when it is running; otherwise its default.
+async function modelControlEnv() {
+  const mc = { ...DEFAULT_SETTINGS.modelControl, ...loadSettings().modelControl };
+  if (!mc.enabled || !Array.isArray(mc.models) || mc.models.length === 0) return {};
+  const baseUrl = mc.baseUrl.replace(/\/+$/, "");
+  const headers = mc.token ? { Authorization: `Bearer ${mc.token}` } : {};
+  const catalog = await fetchJson(`${baseUrl}/models`, headers);
+  const byId = new Map((catalog?.data ?? []).map((m) => [m.id, m]));
+  const models = {};
+  for (const id of mc.models) {
+    const info = byId.get(id)?.modelcontrol ?? {};
+    const context = info.context_length || MODELCONTROL_DEFAULT_CONTEXT;
+    models[id] = {
+      name: id,
+      tool_call: true,
+      limit: { context, output: Math.min(16384, Math.floor(context / 2)) },
+    };
+  }
+  const options = { baseURL: baseUrl };
+  if (mc.token) options.apiKey = mc.token;
+  const provider = { npm: "@ai-sdk/openai-compatible", name: "ModelControl", options, models };
+  return { PAPERCLIP_OPENCODE_PROVIDERS: JSON.stringify({ modelcontrol: provider }) };
 }
 
 // Apps opened from Finder get a bare PATH, so agent CLIs (claude, codex, git…)
@@ -88,7 +165,7 @@ function freePort() {
   });
 }
 
-function serverEnv(port) {
+function serverEnv(port, extra) {
   const env = { ...process.env };
   // Never let a developer shell's settings point the app at another database or port.
   for (const key of ["DATABASE_URL", "DATABASE_MIGRATION_URL", "PORT", "HOST", "NODE_OPTIONS", "PAPERCLIP_CONFIG"]) {
@@ -108,6 +185,7 @@ function serverEnv(port) {
     PAPERCLIP_TELEMETRY_DISABLED: "1",
     DO_NOT_TRACK: "1",
     PAPERCLIP_ANNOUNCEMENTS_ENABLED: "false",
+    ...extra,
   };
 }
 
@@ -160,7 +238,7 @@ async function startServer() {
 
   server = spawn(process.execPath, [SERVER_ENTRY], {
     cwd: ROOT,
-    env: serverEnv(port),
+    env: serverEnv(port, await modelControlEnv()),
     stdio: ["ignore", "pipe", "pipe"],
   });
   server.stdout.pipe(log, { end: false });
@@ -306,6 +384,7 @@ function buildMenu() {
         { label: "Open in Browser", click: () => serverUrl && shell.openExternal(serverUrl) },
         { label: "Show Data Folder", click: () => shell.openPath(DATA_DIR) },
         { label: "Show Server Log", click: () => shell.openPath(SERVER_LOG) },
+        { label: "Edit Model Settings…", click: () => (loadSettings(), shell.openPath(SETTINGS_FILE)) },
         { type: "separator" },
         { role: "hide" },
         { role: "hideOthers" },

@@ -8,7 +8,7 @@
 // Usage: node scripts/stage.mjs [--skip-build]
 
 import { execFileSync } from "node:child_process";
-import { cpSync, existsSync, mkdirSync, rmSync } from "node:fs";
+import { cpSync, existsSync, lstatSync, mkdirSync, readdirSync, realpathSync, rmSync } from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 
@@ -43,6 +43,30 @@ mkdirSync(stageDir, { recursive: true });
 // pnpm's default layout keeps every symlink relative and inside the stage dir.
 // (A hoisted layout fails here: upstream patches packages the server doesn't ship.)
 run("pnpm", ["--filter", "@paperclipai/server", "deploy", "--prod", path.join(stageDir, "server")]);
+
+// pnpm deploy links the server package back to the repo checkout
+// (.pnpm/node_modules/@paperclipai/server -> ../../server). Such links break
+// inside the app bundle and stop code signing, so drop any that leave the stage.
+function removeEscapingLinks(dir) {
+  for (const entry of readdirSync(dir, { withFileTypes: true })) {
+    const full = path.join(dir, entry.name);
+    if (entry.isSymbolicLink()) {
+      let target = null;
+      try {
+        target = realpathSync(full);
+      } catch {
+        // Dangling: remove below.
+      }
+      if (!target || !target.startsWith(stageDir + path.sep)) {
+        console.log(`[stage] removing link outside the app: ${path.relative(stageDir, full)}`);
+        rmSync(full);
+      }
+    } else if (entry.isDirectory() && !lstatSync(full).isSymbolicLink()) {
+      removeEscapingLinks(full);
+    }
+  }
+}
+removeEscapingLinks(stageDir);
 
 cpSync(path.join(repoDir, "server", "dist-runtime"), path.join(stageDir, "server", "dist-runtime"), {
   recursive: true,

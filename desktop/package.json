@@ -9,7 +9,8 @@
     "start": "electron .",
     "stage": "node scripts/stage.mjs",
     "dist:dir": "node scripts/stage.mjs && electron-builder --mac dir",
-    "dist:mac": "node scripts/stage.mjs && electron-builder --mac dmg zip"
+    "dist:mac": "node scripts/stage.mjs && electron-builder --mac zip",
+    "dist:mac:notarized": "node scripts/stage.mjs && electron-builder --mac dmg zip -c.mac.notarize=true"
   },
   "devDependencies": {
     "electron": "44.10.1",
@@ -37,7 +38,7 @@
     "mac": {
       "category": "public.app-category.productivity",
       "icon": "build/icon.icns",
-      "target": ["dmg", "zip"],
+      "target": ["zip"],
       "hardenedRuntime": true,
       "entitlements": "build/entitlements.mac.plist",
       "entitlementsInherit": "build/entitlements.mac.plist",
