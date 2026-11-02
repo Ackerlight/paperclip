@@ -15,12 +15,12 @@ const path = require("node:path");
 const HEALTH_TIMEOUT_MS = 180_000;
 const STOP_TIMEOUT_MS = 20_000;
 
-// Packaged: Resources/paperclip (staged by scripts/stage.mjs).
-// Unpackaged (`npm start`): the repo checkout this folder lives in.
+// The official paperclipai npm release, staged by scripts/stage.mjs.
+// Packaged: Resources/paperclip. Unpackaged (`npm start`): desktop/stage/paperclip.
 const ROOT = app.isPackaged
   ? path.join(process.resourcesPath, "paperclip")
-  : path.resolve(__dirname, "..");
-const SERVER_ENTRY = path.join(ROOT, "server", "dist-runtime", "index.mjs");
+  : path.join(__dirname, "stage", "paperclip");
+const SERVER_ENTRY = path.join(ROOT, "node_modules", "@paperclipai", "server", "dist", "index.js");
 
 const DATA_DIR = app.getPath("userData");
 const PAPERCLIP_HOME = path.join(DATA_DIR, "home");
@@ -110,8 +110,11 @@ function fetchJson(url, headers, timeoutMs = 3000) {
   });
 }
 
-// OpenCode agents pick these up as "modelcontrol/<id>" (PAPERCLIP_OPENCODE_PROVIDERS).
-// Context sizes come from ModelControl when it is running; otherwise its default.
+// OpenCode agents pick these up as "modelcontrol/<id>". The provider goes in
+// OPENCODE_CONFIG_CONTENT, which the opencode CLI merges into its config for
+// both `opencode models` (Paperclip's model picker and pre-run availability
+// check) and agent runs. Context sizes come from ModelControl when it is
+// running; otherwise its default.
 async function modelControlEnv() {
   const mc = { ...DEFAULT_SETTINGS.modelControl, ...loadSettings().modelControl };
   if (!mc.enabled || !Array.isArray(mc.models) || mc.models.length === 0) return {};
@@ -132,7 +135,7 @@ async function modelControlEnv() {
   const options = { baseURL: baseUrl };
   if (mc.token) options.apiKey = mc.token;
   const provider = { npm: "@ai-sdk/openai-compatible", name: "ModelControl", options, models };
-  return { PAPERCLIP_OPENCODE_PROVIDERS: JSON.stringify({ modelcontrol: provider }) };
+  return { OPENCODE_CONFIG_CONTENT: JSON.stringify({ provider: { modelcontrol: provider } }) };
 }
 
 // Apps opened from Finder get a bare PATH, so agent CLIs (claude, codex, git…)
@@ -168,7 +171,11 @@ function freePort() {
 function serverEnv(port, extra) {
   const env = { ...process.env };
   // Never let a developer shell's settings point the app at another database or port.
-  for (const key of ["DATABASE_URL", "DATABASE_MIGRATION_URL", "PORT", "HOST", "NODE_OPTIONS", "PAPERCLIP_CONFIG"]) {
+  // DO_NOT_TRACK reaches the agent CLIs: with it set, `claude setup-token` prints
+  // a copy hint between the sign-in URL and the code prompt, and Paperclip's
+  // parser then never finds the URL (browser sign-in hangs on "Preparing").
+  // PAPERCLIP_TELEMETRY_DISABLED already turns Paperclip's own telemetry off.
+  for (const key of ["DATABASE_URL", "DATABASE_MIGRATION_URL", "PORT", "HOST", "NODE_OPTIONS", "PAPERCLIP_CONFIG", "DO_NOT_TRACK"]) {
     delete env[key];
   }
   return {
@@ -176,14 +183,14 @@ function serverEnv(port, extra) {
     ...loadSecrets(),
     ELECTRON_RUN_AS_NODE: "1",
     NODE_ENV: "production",
-    PATH: loginShellPath(),
+    // The release's own agent CLIs (opencode, codex, claude-agent-acp…) come first.
+    PATH: [path.join(ROOT, "node_modules", ".bin"), loginShellPath()].join(path.delimiter),
     HOST: "127.0.0.1",
     PORT: String(port),
     SERVE_UI: "true",
     PAPERCLIP_HOME,
     PAPERCLIP_INSTANCE_ID: "default",
     PAPERCLIP_TELEMETRY_DISABLED: "1",
-    DO_NOT_TRACK: "1",
     PAPERCLIP_ANNOUNCEMENTS_ENABLED: "false",
     ...extra,
   };
@@ -228,7 +235,7 @@ function checkHealth(url) {
 
 async function startServer() {
   if (!fs.existsSync(SERVER_ENTRY)) {
-    throw new Error(`Server bundle not found at ${SERVER_ENTRY}. Run "pnpm --filter @paperclipai/server build:runtime" first.`);
+    throw new Error(`Paperclip server not found at ${SERVER_ENTRY}. Run "npm run stage" first.`);
   }
   fs.mkdirSync(LOG_DIR, { recursive: true });
   const port = await freePort();

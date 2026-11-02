@@ -1,78 +1,40 @@
 // Stages the runtime that ships inside Paperclip.app (Resources/paperclip):
+// the official `paperclipai` npm release (CLI + @paperclipai/server with its
+// built UI and vendored agent runner) and its production dependencies.
 //
-//   stage/paperclip/server/dist-runtime   bundled server (workspace packages inlined)
-//   stage/paperclip/server/dist           server build assets the bundle reads at runtime
-//   stage/paperclip/server/node_modules   production third-party dependencies
-//   stage/paperclip/ui/dist               built board UI, served by the server
+// The published packages are built to run from any location. The fork's own
+// server bundle (server/dist-runtime) is not: esbuild bakes the build
+// machine's absolute paths into it, so it only works next to the checkout.
 //
-// Usage: node scripts/stage.mjs [--skip-build]
+// Usage: node scripts/stage.mjs   (version: "paperclipRelease" in package.json)
 
 import { execFileSync } from "node:child_process";
-import { cpSync, existsSync, lstatSync, mkdirSync, readdirSync, realpathSync, rmSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 
 const desktopDir = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
-const repoDir = path.resolve(desktopDir, "..");
 const stageDir = path.join(desktopDir, "stage", "paperclip");
-const skipBuild = process.argv.includes("--skip-build");
-
-function run(cmd, args, cwd = repoDir) {
-  console.log(`[stage] ${cmd} ${args.join(" ")}`);
-  execFileSync(cmd, args, {
-    cwd,
-    stdio: "inherit",
-    env: { ...process.env, PAPERCLIP_TELEMETRY_DISABLED: "1", COREPACK_ENABLE_DOWNLOAD_PROMPT: "0" },
-  });
-}
-
-if (!skipBuild) {
-  run("pnpm", ["build"]);
-  run("pnpm", ["--filter", "@paperclipai/server", "build:runtime"]);
-}
-
-for (const required of ["server/dist-runtime/index.mjs", "server/dist/index.js", "ui/dist/index.html"]) {
-  if (!existsSync(path.join(repoDir, required))) {
-    throw new Error(`Missing ${required}; run without --skip-build.`);
-  }
-}
+const { paperclipRelease } = JSON.parse(readFileSync(path.join(desktopDir, "package.json"), "utf8"));
+if (!paperclipRelease) throw new Error('Set "paperclipRelease" in desktop/package.json.');
 
 rmSync(path.join(desktopDir, "stage"), { recursive: true, force: true });
 mkdirSync(stageDir, { recursive: true });
+writeFileSync(
+  path.join(stageDir, "package.json"),
+  `${JSON.stringify({ name: "paperclip-desktop-runtime", private: true }, null, 2)}\n`,
+);
 
-// pnpm's default layout keeps every symlink relative and inside the stage dir.
-// (A hoisted layout fails here: upstream patches packages the server doesn't ship.)
-run("pnpm", ["--filter", "@paperclipai/server", "deploy", "--prod", path.join(stageDir, "server")]);
+console.log(`[stage] npm install paperclipai@${paperclipRelease}`);
+execFileSync(
+  "npm",
+  ["install", "--omit=dev", "--no-audit", "--no-fund", "--save-exact", `paperclipai@${paperclipRelease}`],
+  { cwd: stageDir, stdio: "inherit", env: { ...process.env, PAPERCLIP_TELEMETRY_DISABLED: "1" } },
+);
 
-// pnpm deploy links the server package back to the repo checkout
-// (.pnpm/node_modules/@paperclipai/server -> ../../server). Such links break
-// inside the app bundle and stop code signing, so drop any that leave the stage.
-function removeEscapingLinks(dir) {
-  for (const entry of readdirSync(dir, { withFileTypes: true })) {
-    const full = path.join(dir, entry.name);
-    if (entry.isSymbolicLink()) {
-      let target = null;
-      try {
-        target = realpathSync(full);
-      } catch {
-        // Dangling: remove below.
-      }
-      if (!target || !target.startsWith(stageDir + path.sep)) {
-        console.log(`[stage] removing link outside the app: ${path.relative(stageDir, full)}`);
-        rmSync(full);
-      }
-    } else if (entry.isDirectory() && !lstatSync(full).isSymbolicLink()) {
-      removeEscapingLinks(full);
-    }
-  }
+const serverEntry = path.join(stageDir, "node_modules", "@paperclipai", "server", "dist", "index.js");
+const uiIndex = path.join(stageDir, "node_modules", "@paperclipai", "server", "ui-dist", "index.html");
+for (const required of [serverEntry, uiIndex]) {
+  if (!existsSync(required)) throw new Error(`Release is missing ${path.relative(stageDir, required)}`);
 }
-removeEscapingLinks(stageDir);
-
-cpSync(path.join(repoDir, "server", "dist-runtime"), path.join(stageDir, "server", "dist-runtime"), {
-  recursive: true,
-  filter: (src) => !src.endsWith(".map"),
-});
-cpSync(path.join(repoDir, "server", "dist"), path.join(stageDir, "server", "dist"), { recursive: true });
-cpSync(path.join(repoDir, "ui", "dist"), path.join(stageDir, "ui", "dist"), { recursive: true });
-
 console.log(`[stage] done: ${stageDir}`);

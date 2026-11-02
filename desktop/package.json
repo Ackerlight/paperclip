@@ -1,7 +1,8 @@
 {
   "name": "paperclip-desktop",
   "productName": "Paperclip",
-  "version": "0.3.1",
+  "version": "2026.1023.0",
+  "paperclipRelease": "2026.1023.0",
   "private": true,
   "description": "Paperclip as a self-contained Mac app: the server, database and UI run inside one window.",
   "main": "main.cjs",
@@ -28,12 +29,7 @@
       "loading.html",
       "package.json"
     ],
-    "extraResources": [
-      {
-        "from": "stage/paperclip",
-        "to": "paperclip"
-      }
-    ],
+    "afterPack": "scripts/after-pack.cjs",
     "asar": true,
     "mac": {
       "category": "public.app-category.productivity",
