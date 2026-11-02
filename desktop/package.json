@@ -1,0 +1,47 @@
+{
+  "name": "paperclip-desktop",
+  "productName": "Paperclip",
+  "version": "0.3.1",
+  "private": true,
+  "description": "Paperclip as a self-contained Mac app: the server, database and UI run inside one window.",
+  "main": "main.cjs",
+  "scripts": {
+    "start": "electron .",
+    "stage": "node scripts/stage.mjs",
+    "dist:dir": "node scripts/stage.mjs && electron-builder --mac dir",
+    "dist:mac": "node scripts/stage.mjs && electron-builder --mac dmg zip"
+  },
+  "devDependencies": {
+    "electron": "44.10.1",
+    "electron-builder": "26.18.0"
+  },
+  "build": {
+    "appId": "net.creativedigital.paperclip",
+    "productName": "Paperclip",
+    "directories": {
+      "output": "dist",
+      "buildResources": "build"
+    },
+    "files": [
+      "main.cjs",
+      "loading.html",
+      "package.json"
+    ],
+    "extraResources": [
+      {
+        "from": "stage/paperclip",
+        "to": "paperclip"
+      }
+    ],
+    "asar": true,
+    "mac": {
+      "category": "public.app-category.productivity",
+      "icon": "build/icon.icns",
+      "target": ["dmg", "zip"],
+      "hardenedRuntime": true,
+      "entitlements": "build/entitlements.mac.plist",
+      "entitlementsInherit": "build/entitlements.mac.plist",
+      "notarize": false
+    }
+  }
+}
