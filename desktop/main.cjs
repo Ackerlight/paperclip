@@ -44,6 +44,9 @@ const DEFAULT_SETTINGS = {
       "openrouter/anthropic/claude-sonnet-4.5",
     ],
   },
+  // Largest file a chat, comment or task attachment may be (Paperclip's own
+  // default is 10 MB). Uploads are buffered in memory, so keep it sensible.
+  attachmentMaxMB: 512,
 };
 // ModelControl serves models whose native window it could not parse at this size.
 const MODELCONTROL_DEFAULT_CONTEXT = 8192;
@@ -178,6 +181,7 @@ function serverEnv(port, extra) {
   for (const key of ["DATABASE_URL", "DATABASE_MIGRATION_URL", "PORT", "HOST", "NODE_OPTIONS", "PAPERCLIP_CONFIG", "DO_NOT_TRACK"]) {
     delete env[key];
   }
+  const attachmentMaxMB = Number(loadSettings().attachmentMaxMB) || DEFAULT_SETTINGS.attachmentMaxMB;
   return {
     ...env,
     ...loadSecrets(),
@@ -192,6 +196,7 @@ function serverEnv(port, extra) {
     PAPERCLIP_INSTANCE_ID: "default",
     PAPERCLIP_TELEMETRY_DISABLED: "1",
     PAPERCLIP_ANNOUNCEMENTS_ENABLED: "false",
+    PAPERCLIP_ATTACHMENT_MAX_BYTES: String(Math.floor(attachmentMaxMB * 1024 * 1024)),
     ...extra,
   };
 }
