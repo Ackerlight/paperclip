@@ -127,6 +127,47 @@ const support = externalDatabaseUrl ? { supported: true } : await getEmbeddedPos
     },
   );
 
+  async function seedAnsweredQuestionInterrupt() {
+    const input = await seedInterrupt();
+    const interactionId = randomUUID();
+    await db.insert(issueThreadInteractions).values({
+      id: interactionId, companyId: input.companyId, issueId: input.issueId,
+      kind: "ask_user_questions", status: "answered", createdByAgentId: input.agentId,
+      resolvedByUserId: "owner", resolvedAt: new Date(), continuationPolicy: "wake_assignee",
+      requestedResolverPolicy: "human_only", effectiveResolverPolicy: "human_only",
+      resolverPolicyProvenance: "explicit", title: "Which scope?",
+      payload: { version: 1, questions: [] }, result: { version: 1, answers: [] },
+    });
+    const context = { issueId: input.issueId, interactionId, interactionKind: "ask_user_questions", interactionStatus: "answered" };
+    await db.update(agentWakeupRequests).set({ payload: { issueId: input.issueId, mutation: "interaction",
+      interactionId, interactionStatus: "answered", _paperclipWakeContext: context,
+      queuedCommentInterrupt: { actorId: "operator", requestedAt: new Date().toISOString() } },
+    }).where(eq(agentWakeupRequests.id, input.queueId));
+    await db.update(heartbeatRuns).set({ contextSnapshot: context }).where(eq(heartbeatRuns.id, input.runId));
+    return { ...input, interactionId, contextSnapshot: context };
+  }
+
+  it("uses the clicking operator when the interrupted queue holds an answered question", async () => {
+    const input = await seedAnsweredQuestionInterrupt();
+    const identity = await initializeRunIdentity(db, { ...input, messageIds: undefined, responsibleUserId: "owner", cause: "dispatch" });
+    expect(identity).toMatchObject({ responsibleUserId: "operator", cause: "queued_comment_interrupt" });
+  });
+
+  it.each(["not-delivered", "reopened", "no-marker"])("rejects an answered-question interrupt whose evidence is %s", async (fault) => {
+    const input = await seedAnsweredQuestionInterrupt();
+    if (fault === "not-delivered") {
+      await db.update(heartbeatRuns).set({ contextSnapshot: { ...input.contextSnapshot, interactionId: randomUUID() } }).where(eq(heartbeatRuns.id, input.runId));
+    } else if (fault === "reopened") {
+      await db.update(issueThreadInteractions).set({ status: "pending" }).where(eq(issueThreadInteractions.id, input.interactionId));
+    } else {
+      const [receipt] = await db.select().from(agentWakeupRequests).where(eq(agentWakeupRequests.id, input.queueId));
+      const { queuedCommentInterrupt: _marker, ...payload } = receipt.payload as Record<string, unknown>;
+      await db.update(agentWakeupRequests).set({ payload }).where(eq(agentWakeupRequests.id, input.queueId));
+    }
+    await expect(initializeRunIdentity(db, { ...input, messageIds: undefined, responsibleUserId: "owner", cause: "dispatch" })).rejects.toThrow("interrupt authority");
+    expect(await listRunIdentityContexts(db, input.companyId, input.runId)).toHaveLength(0);
+  });
+
   it.each([undefined, "github_credentials", "request_authentication", "identity", "task_authorization", "token_broker", "project_execution"] as const)("holds acquisition during uncertain steering and never rewinds on replay with %s", async (readScope) => {
     const options = readScope ? { readScope } : undefined;
     const input = await seed();

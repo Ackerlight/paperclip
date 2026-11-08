@@ -152,13 +152,21 @@ export async function getConversationOwnershipBlocker(db: Db, companyId: string,
       if (leases.every(lease => lease.provider !== "local")) continue;
     }
     let pidAlive = run.processPid !== null && processMayBeAlive(run.processPid);
+    let groupAlive = run.processGroupId !== null && processMayBeAlive(-run.processGroupId);
     if (pidAlive && run.processStartedAt) {
       // A recycled PID cannot keep an old task blocked. An unreadable identity
-      // stays conservative; the original process may still own execution.
+      // stays conservative; the original process may still own execution. Only
+      // a later start is proof: when the OS start time could not be read at
+      // spawn, the recorded time is a slightly later server clock reading.
       const observed = await readProcessStartedAt(run.processPid!).catch(() => null);
-      if (observed && new Date(observed).getTime() !== run.processStartedAt.getTime()) pidAlive = false;
+      if (observed && new Date(observed).getTime() > run.processStartedAt.getTime()) {
+        pidAlive = false;
+        // The OS does not reuse a PID while a group with that ID has members,
+        // so a live group here belongs to the new process. A different leader
+        // proves nothing about the group, and a dead leader can leave children.
+        if (run.processGroupId === run.processPid) groupAlive = false;
+      }
     }
-    const groupAlive = run.processGroupId !== null && processMayBeAlive(-run.processGroupId);
     if (pidAlive || groupAlive || leaseHeld) {
       return {
         runId: run.id,

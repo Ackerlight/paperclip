@@ -15,6 +15,7 @@ import { notifyChatRunMilestones } from "./chat-run-milestone-notifications.js";
 import { boundRunIssueId, boundRunIssueIdSql, runTaskContextColumn } from "./run-task-binding.js";
 import { isUuidLike } from "@paperclipai/shared";
 import { queuedCommentIdsFromRunContext, queuedCommentIdsFromWakePayload } from "./issue-queued-comment-queue.js";
+import { queuedInteractionId, readQueuedInteractionResponse } from "./queued-interaction-response.js";
 
 /** Resolve an explicit click from persisted receipts, never caller context or message authors. */
 export async function explicitOperatorRunIdentity(
@@ -48,11 +49,22 @@ export async function explicitOperatorRunIdentity(
   const actorId = marker && typeof marker === "object" && "actorId" in marker ? marker.actorId : null;
   const ids = queuedCommentIdsFromWakePayload(receipt?.payload);
   const deliveredIds = queuedCommentIdsFromRunContext(run.contextSnapshot);
-  if (typeof actorId !== "string" || !actorId || !ids.length ||
-      receipt?.payload?.issueId !== run.contextSnapshot?.issueId ||
+  const issueId = receipt?.payload?.issueId;
+  if (typeof actorId !== "string" || !actorId || typeof issueId !== "string" ||
+      issueId !== run.contextSnapshot?.issueId ||
       !ids.every(id => deliveredIds.includes(id)) ||
       request.requestedByActorType !== "user" || request.requestedByActorId !== actorId) {
     throw forbidden("Queued-message interrupt authority is unavailable");
+  }
+  if (!ids.length) {
+    // An answered question queues no comments. Its resolved card, delivered to
+    // this run, is the same evidence, so the operator's click still attributes
+    // the run. Falling back to a normal wake would drop that attribution.
+    const interactionId = queuedInteractionId(receipt?.payload);
+    if (!interactionId || interactionId !== run.contextSnapshot?.interactionId ||
+        !await readQueuedInteractionResponse(executor as Db, run.companyId, issueId, receipt?.payload)) {
+      throw forbidden("Queued-message interrupt authority is unavailable");
+    }
   }
   return { actorId, cause: "queued_comment_interrupt" };
 }
