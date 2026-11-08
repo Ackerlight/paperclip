@@ -1,10 +1,13 @@
+import { spawn, type ChildProcess } from "node:child_process";
 import { randomUUID } from "node:crypto";
-import { afterAll, beforeAll, describe, expect, it } from "vitest";
+import { once } from "node:events";
+import { afterAll, afterEach, beforeAll, describe, expect, it } from "vitest";
 import { and, eq } from "drizzle-orm";
 import { agents, companies, createDb, heartbeatRuns, issues, issueRecoveryActions, type Db } from "@paperclipai/db";
 import { getEmbeddedPostgresTestSupport, startEmbeddedPostgresTestDatabase } from "../__tests__/helpers/embedded-postgres.js";
 import { conversationRecoveryActionPredicate, getConversationOwnershipBlocker } from "./conversation-continuation.js";
 import { deliverExecutionStatuses } from "./execution-status-delivery.js";
+import { readProcessStartedAt } from "./hot-restart.js";
 
 const support = await getEmbeddedPostgresTestSupport();
 const describePostgres = support.supported ? describe : describe.skip;
@@ -59,6 +62,67 @@ describePostgres("execution identity query contracts", () => {
     expect(await getConversationOwnershipBlocker(db, f.companyId, f.issueId)).toMatchObject({ runId: legacy.id });
     await db.update(heartbeatRuns).set({ processPid: null }).where(eq(heartbeatRuns.id, legacy.id));
     expect(await getConversationOwnershipBlocker(db, f.companyId, f.issueId)).toBeNull();
+  });
+  describe.skipIf(process.platform === "win32")("recycled process identity", () => {
+    const groups: ChildProcess[] = [];
+    afterEach(() => {
+      for (const child of groups.splice(0)) {
+        try { process.kill(-child.pid!, "SIGKILL"); } catch { /* already gone */ }
+      }
+    });
+    function spawnGroupLeader() {
+      const child = spawn("sleep", ["60"], { detached: true, stdio: "ignore" });
+      groups.push(child);
+      return child.pid!;
+    }
+    async function runWith(f: Awaited<ReturnType<typeof fixture>>, identity: {
+      processPid: number; processGroupId: number; processStartedAt: Date | null;
+    }) {
+      const row = await run(f, { issueId: f.issueId });
+      await db.update(heartbeatRuns).set(identity).where(eq(heartbeatRuns.id, row.id));
+      return row;
+    }
+    const startedAt = async (pid: number) => new Date(await readProcessStartedAt(pid));
+    const beforeStart = (at: Date) => new Date(at.getTime() - 86_400_000);
+
+    it("does not let a process that reused the run's PID and group block the task", async () => {
+      const f = await fixture();
+      const pid = spawnGroupLeader();
+      await runWith(f, { processPid: pid, processGroupId: pid, processStartedAt: beforeStart(await startedAt(pid)) });
+      expect(await getConversationOwnershipBlocker(db, f.companyId, f.issueId)).toBeNull();
+    });
+    it("keeps holding the original group leader", async () => {
+      const f = await fixture();
+      const pid = spawnGroupLeader();
+      const row = await runWith(f, { processPid: pid, processGroupId: pid, processStartedAt: await startedAt(pid) });
+      expect(await getConversationOwnershipBlocker(db, f.companyId, f.issueId)).toMatchObject({ runId: row.id, cause: "execution_owner_active" });
+    });
+    it("keeps holding when the recorded start is only a server clock reading after spawn", async () => {
+      const f = await fixture();
+      const pid = spawnGroupLeader();
+      const row = await runWith(f, { processPid: pid, processGroupId: pid, processStartedAt: new Date((await startedAt(pid)).getTime() + 750) });
+      expect(await getConversationOwnershipBlocker(db, f.companyId, f.issueId)).toMatchObject({ runId: row.id });
+    });
+    it("keeps holding when the start time was never recorded", async () => {
+      const f = await fixture();
+      const pid = spawnGroupLeader();
+      const row = await runWith(f, { processPid: pid, processGroupId: pid, processStartedAt: null });
+      expect(await getConversationOwnershipBlocker(db, f.companyId, f.issueId)).toMatchObject({ runId: row.id });
+    });
+    it("keeps holding a separately led group when only the PID was recycled", async () => {
+      const f = await fixture();
+      const pid = spawnGroupLeader(), group = spawnGroupLeader();
+      const row = await runWith(f, { processPid: pid, processGroupId: group, processStartedAt: beforeStart(await startedAt(pid)) });
+      expect(await getConversationOwnershipBlocker(db, f.companyId, f.issueId)).toMatchObject({ runId: row.id });
+    });
+    it("keeps holding children that outlive their group leader", async () => {
+      const f = await fixture();
+      const leader = spawn("sh", ["-c", "sleep 60 & exit 0"], { detached: true, stdio: "ignore" });
+      groups.push(leader);
+      await once(leader, "exit");
+      const row = await runWith(f, { processPid: leader.pid!, processGroupId: leader.pid!, processStartedAt: new Date(Date.now() - 86_400_000) });
+      expect(await getConversationOwnershipBlocker(db, f.companyId, f.issueId)).toMatchObject({ runId: row.id });
+    });
   });
   it("delivers canonical same-company task IDs and keeps malformed IDs private", async () => {
     const f = await fixture(), foreign = await fixture();
