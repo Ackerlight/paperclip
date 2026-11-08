@@ -4,13 +4,15 @@
 // process of this app, bound to 127.0.0.1 on a free port, and shows the board
 // UI in an app window. Quitting the app stops the server and the database.
 
-const { app, BrowserWindow, Menu, dialog, shell } = require("electron");
+const { app, BrowserWindow, Menu, dialog, ipcMain, shell } = require("electron");
 const { spawn, execFileSync } = require("node:child_process");
 const crypto = require("node:crypto");
 const fs = require("node:fs");
 const http = require("node:http");
 const net = require("node:net");
 const path = require("node:path");
+const { createChatBridge } = require("./chat-bridge.cjs");
+const { createWorkFolders } = require("./work-folders.cjs");
 
 const HEALTH_TIMEOUT_MS = 180_000;
 const STOP_TIMEOUT_MS = 20_000;
@@ -28,6 +30,10 @@ const LOG_DIR = path.join(DATA_DIR, "logs");
 const SERVER_LOG = path.join(LOG_DIR, "server.log");
 const SECRETS_FILE = path.join(DATA_DIR, "desktop-secrets.json");
 const SETTINGS_FILE = path.join(DATA_DIR, "desktop-settings.json");
+const workFolders = createWorkFolders();
+const WORK_SYNC_INTERVAL_MS = 60 * 1000;
+let workSyncTimer = null;
+let cleanupWindow = null;
 
 // ModelControl (local hub at :8800) serves local GGUF and OpenRouter models over an
 // OpenAI-compatible API. Its tool-capable starter set; edit desktop-settings.json to change.
@@ -47,9 +53,19 @@ const DEFAULT_SETTINGS = {
   // Largest file a chat, comment or task attachment may be (Paperclip's own
   // default is 10 MB). Uploads are buffered in memory, so keep it sensible.
   attachmentMaxMB: 512,
+  // Local port for the Claude Code chat bridge (chat-bridge.cjs).
+  chatBridge: { port: 47821 },
 };
 // ModelControl serves models whose native window it could not parse at this size.
 const MODELCONTROL_DEFAULT_CONTEXT = 8192;
+
+const chatBridge = createChatBridge({
+  port: Number(loadSettings().chatBridge?.port) || DEFAULT_SETTINGS.chatBridge.port,
+  dataDir: DATA_DIR,
+  getServerUrl: () => serverUrl,
+  skillPath: path.join(ROOT, "node_modules", "@paperclipai", "server", "skills", "paperclip", "SKILL.md"),
+  log: (line) => fs.appendFile(SERVER_LOG, `${line}\n`, () => {}),
+});
 
 let mainWindow = null;
 let server = null;
@@ -197,6 +213,10 @@ function serverEnv(port, extra) {
     PAPERCLIP_TELEMETRY_DISABLED: "1",
     PAPERCLIP_ANNOUNCEMENTS_ENABLED: "false",
     PAPERCLIP_ATTACHMENT_MAX_BYTES: String(Math.floor(attachmentMaxMB * 1024 * 1024)),
+    // HTTP agents may only reach private addresses on this allowlist; enrolled
+    // Claude Code chats are woken through the local chat bridge.
+    PAPERCLIP_HTTP_ADAPTER_PRIVATE_ENDPOINT_ALLOWLIST: chatBridge.bridgeUrl,
+    ...workFolders.serverEnv(),
     ...extra,
   };
 }
@@ -378,12 +398,75 @@ async function restartServer() {
 async function boot() {
   setStatus("Starting Paperclip", "Starting the local server and database…");
   try {
+    workFolders.ensureFolders();
     serverUrl = await startServer();
+    startWorkFolderSync();
     await mainWindow.loadURL(serverUrl);
   } catch (error) {
     setStatus("Paperclip could not start", error.message, tailLog(), true);
   }
 }
+
+// Keeps new agents' folders named and their instructions pointing at visible paths.
+function startWorkFolderSync() {
+  clearInterval(workSyncTimer);
+  const sync = async () => {
+    if (!serverUrl) return;
+    try {
+      workFolders.syncInstructions(path.join(PAPERCLIP_HOME, "instances", "default"));
+      await workFolders.syncAgentFolders(serverUrl);
+    } catch (error) {
+      console.error(`Work folder sync failed: ${error.message}`);
+    }
+  };
+  sync();
+  workSyncTimer = setInterval(sync, WORK_SYNC_INTERVAL_MS);
+}
+
+function openCleanupWindow() {
+  if (cleanupWindow) {
+    cleanupWindow.focus();
+    return;
+  }
+  cleanupWindow = new BrowserWindow({
+    width: 720,
+    height: 640,
+    title: "Clean Up Old Work",
+    webPreferences: { preload: path.join(__dirname, "cleanup-preload.cjs"), contextIsolation: true, sandbox: true },
+  });
+  cleanupWindow.on("closed", () => {
+    cleanupWindow = null;
+  });
+  cleanupWindow.loadFile(path.join(__dirname, "cleanup.html"));
+}
+
+function handleCleanup(channel, handler) {
+  ipcMain.handle(channel, (event, ...args) => {
+    if (event.sender !== cleanupWindow?.webContents) throw new Error("Not the cleanup window.");
+    return handler(...args);
+  });
+}
+
+handleCleanup("cleanup:scan", (keepDays) => {
+  if (!serverUrl) throw new Error("Paperclip is still starting. Try again in a moment.");
+  return workFolders.scan({ baseUrl: serverUrl, keepDays: Number(keepDays) || 0 });
+});
+handleCleanup("cleanup:trash", async (ids) => {
+  const { response } = await dialog.showMessageBox(cleanupWindow, {
+    type: "warning",
+    buttons: ["Move to Trash", "Cancel"],
+    defaultId: 1,
+    cancelId: 1,
+    message: `Move ${ids.length} item${ids.length === 1 ? "" : "s"} to the Trash?`,
+    detail: "You can restore them from the Trash until you empty it.",
+  });
+  if (response !== 0) return { cancelled: true, moved: [], failed: [] };
+  return workFolders.moveToTrash(ids, (target) => shell.trashItem(target));
+});
+handleCleanup("cleanup:reveal", (id) => {
+  const target = workFolders.itemPath(id);
+  if (target) shell.showItemInFolder(target);
+});
 
 function buildMenu() {
   const template = [
@@ -394,9 +477,14 @@ function buildMenu() {
         { type: "separator" },
         { label: "Restart Server", click: () => restartServer() },
         { label: "Open in Browser", click: () => serverUrl && shell.openExternal(serverUrl) },
+        { label: "Open Work Folder", click: () => shell.openPath(workFolders.workRoot) },
+        { label: "Clean Up Old Work…", click: () => openCleanupWindow() },
+        { type: "separator" },
         { label: "Show Data Folder", click: () => shell.openPath(DATA_DIR) },
         { label: "Show Server Log", click: () => shell.openPath(SERVER_LOG) },
         { label: "Edit Model Settings…", click: () => (loadSettings(), shell.openPath(SETTINGS_FILE)) },
+        { type: "separator" },
+        { label: "Enroll Claude Code Chat…", click: () => enrollChatDialog() },
         { type: "separator" },
         { role: "hide" },
         { role: "hideOthers" },
@@ -432,7 +520,57 @@ function buildMenu() {
   Menu.setApplicationMenu(Menu.buildFromTemplate(template));
 }
 
+// Pick a live Claude Code chat and enroll it as a Paperclip agent.
+async function enrollChatDialog() {
+  try {
+    if (!serverUrl) throw new Error("Paperclip is still starting. Try again in a moment.");
+    const enrolled = new Set(Object.values(chatBridge.enrolled()).map((a) => a.sessionId));
+    const chats = chatBridge.listLiveChats().filter((c) => !enrolled.has(c.sessionId)).slice(0, 12);
+    if (chats.length === 0) {
+      await dialog.showMessageBox(mainWindow, {
+        message: "No Claude Code chats to enroll",
+        detail: "Open the chat in the Claude app or a terminal first. Chats already enrolled are not listed.",
+      });
+      return;
+    }
+    const pick = await dialog.showMessageBox(mainWindow, {
+      message: "Enroll which Claude Code chat?",
+      detail: "Paperclip will create an agent for it and send it work as messages. The chat stays open and usable in Claude.\n\n"
+        + chats.map((c) => `${c.name} — ${c.cwd}`).join("\n"),
+      buttons: [...chats.map((c) => c.name), "Cancel"],
+      cancelId: chats.length,
+    });
+    if (pick.response >= chats.length) return;
+    const chat = chats[pick.response];
+
+    const companies = await fetchJson(`${serverUrl}/api/companies`, {}, 5000);
+    if (!Array.isArray(companies) || companies.length === 0) throw new Error("No Paperclip company found.");
+    let company = companies[0];
+    if (companies.length > 1) {
+      const which = await dialog.showMessageBox(mainWindow, {
+        message: `Enroll "${chat.name}" in which company?`,
+        buttons: [...companies.map((c) => c.name), "Cancel"],
+        cancelId: companies.length,
+      });
+      if (which.response >= companies.length) return;
+      company = companies[which.response];
+    }
+
+    const result = await chatBridge.enroll(chat, company.id);
+    await dialog.showMessageBox(mainWindow, {
+      message: result.alreadyEnrolled ? `"${chat.name}" is already enrolled` : `Enrolled "${chat.name}"`,
+      detail: "It now appears in Paperclip as an agent. Assign it an issue to send it work.",
+    });
+    mainWindow?.loadURL(`${serverUrl}/agents/${result.agentId}`);
+  } catch (error) {
+    dialog.showErrorBox("Enroll Claude Code chat", error.message);
+  }
+}
+
 async function start() {
+  chatBridge.start().catch((error) => {
+    fs.appendFile(SERVER_LOG, `[chat-bridge] could not listen: ${error.message}\n`, () => {});
+  });
   buildMenu();
   await createWindow();
   await boot();

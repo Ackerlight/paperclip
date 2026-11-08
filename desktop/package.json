@@ -26,6 +26,10 @@
     },
     "files": [
       "main.cjs",
+      "chat-bridge.cjs",
+      "work-folders.cjs",
+      "cleanup-preload.cjs",
+      "cleanup.html",
       "loading.html",
       "package.json"
     ],

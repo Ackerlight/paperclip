@@ -1,0 +1,160 @@
+<!doctype html>
+<html>
+<head>
+<meta charset="utf-8">
+<meta http-equiv="Content-Security-Policy" content="default-src 'none'; style-src 'unsafe-inline'; script-src 'unsafe-inline'">
+<title>Clean Up Old Work</title>
+<style>
+  :root { color-scheme: light dark; --bg: #fff; --fg: #1d1d1f; --muted: #6e6e73; --line: #e3e3e6; --warn: #a15c00; --accent: #b3261e; }
+  @media (prefers-color-scheme: dark) { :root { --bg: #1e1e1f; --fg: #f2f2f4; --muted: #a1a1a6; --line: #38383a; --warn: #e0a24a; --accent: #e5736b; } }
+  * { box-sizing: border-box; }
+  body { margin: 0; height: 100vh; display: flex; flex-direction: column; background: var(--bg); color: var(--fg); font: 13px/1.4 -apple-system, system-ui, sans-serif; }
+  header { padding: 14px 16px; border-bottom: 1px solid var(--line); }
+  header p { margin: 0 0 10px; color: var(--muted); }
+  main { flex: 1; overflow-y: auto; padding: 0 16px 12px; }
+  h2 { font-size: 12px; margin: 16px 0 4px; color: var(--muted); font-weight: 600; }
+  .row { display: grid; grid-template-columns: 20px 1fr auto auto; gap: 8px; align-items: start; padding: 7px 0; border-top: 1px solid var(--line); }
+  .row.locked { opacity: .55; }
+  .label { font-weight: 500; overflow-wrap: anywhere; }
+  .detail { color: var(--muted); font-size: 12px; }
+  .warning { color: var(--warn); }
+  .size { color: var(--muted); white-space: nowrap; font-variant-numeric: tabular-nums; }
+  button { font: inherit; padding: 4px 10px; }
+  .link { background: none; border: 0; padding: 0; color: var(--muted); text-decoration: underline; cursor: pointer; font-size: 12px; }
+  footer { padding: 10px 16px; border-top: 1px solid var(--line); display: flex; justify-content: space-between; align-items: center; gap: 12px; }
+  #trash { color: var(--accent); font-weight: 600; }
+  #message { color: var(--muted); }
+  #message.error { color: var(--accent); }
+</style>
+</head>
+<body>
+<header>
+  <p>Ticked items move to the Trash, so you can still get them back until you empty it. Only finished work older than the age below is ticked for you, and never anything with uncommitted or unpushed Git work.</p>
+  <label>Older than
+    <select id="days">
+      <option value="0">Any age</option>
+      <option value="7">7 days</option>
+      <option value="14" selected>14 days</option>
+      <option value="30">30 days</option>
+      <option value="90">90 days</option>
+    </select>
+  </label>
+</header>
+<main id="list"></main>
+<footer>
+  <span id="message" role="status"></span>
+  <button id="trash" disabled>Move to Trash</button>
+</footer>
+<script>
+  const GROUPS = [
+    ["task", "Task folders"],
+    ["worktree", "Git worktrees"],
+    ["agent", "Loose files in agent folders"],
+    ["superseded", "Older duplicate repos"],
+  ];
+  const list = document.getElementById("list");
+  const message = document.getElementById("message");
+  const trash = document.getElementById("trash");
+  const days = document.getElementById("days");
+  let items = [];
+  const ticked = new Set();
+
+  const size = (bytes) => {
+    if (bytes < 1024 * 1024) return `${Math.max(1, Math.round(bytes / 1024))} KB`;
+    if (bytes < 1024 * 1024 * 1024) return `${(bytes / 1024 / 1024).toFixed(1)} MB`;
+    return `${(bytes / 1024 / 1024 / 1024).toFixed(2)} GB`;
+  };
+  const say = (text, isError) => { message.textContent = text; message.className = isError ? "error" : ""; };
+  const age = (ms) => {
+    const n = Math.floor((Date.now() - ms) / 86400000);
+    return n <= 0 ? "changed today" : `changed ${n} day${n === 1 ? "" : "s"} ago`;
+  };
+
+  function updateFooter() {
+    const total = items.filter((item) => ticked.has(item.id)).reduce((sum, item) => sum + item.sizeBytes, 0);
+    trash.disabled = ticked.size === 0;
+    trash.textContent = ticked.size ? `Move ${ticked.size} to Trash (${size(total)})` : "Move to Trash";
+  }
+
+  function render() {
+    list.replaceChildren();
+    for (const [kind, title] of GROUPS) {
+      const group = items.filter((item) => item.kind === kind);
+      if (!group.length) continue;
+      const heading = document.createElement("h2");
+      heading.textContent = title;
+      list.append(heading);
+      for (const item of group) {
+        const row = document.createElement("label");
+        row.className = `row${item.locked ? " locked" : ""}`;
+        const box = document.createElement("input");
+        box.type = "checkbox";
+        box.disabled = Boolean(item.locked);
+        box.checked = ticked.has(item.id);
+        box.addEventListener("change", () => {
+          if (box.checked) ticked.add(item.id); else ticked.delete(item.id);
+          updateFooter();
+        });
+        const text = document.createElement("div");
+        const label = document.createElement("div");
+        label.className = "label";
+        label.textContent = item.label;
+        const detail = document.createElement("div");
+        detail.className = `detail${item.warning ? " warning" : ""}`;
+        detail.textContent = `${item.detail}. ${item.locked ? "Kept while the issue is open. " : ""}${age(item.modified)}`;
+        text.append(label, detail);
+        const amount = document.createElement("span");
+        amount.className = "size";
+        amount.textContent = size(item.sizeBytes);
+        const show = document.createElement("button");
+        show.className = "link";
+        show.textContent = "Show";
+        show.addEventListener("click", (event) => { event.preventDefault(); window.cleanup.reveal(item.id); });
+        row.append(box, text, amount, show);
+        list.append(row);
+      }
+    }
+    if (!items.length) {
+      const none = document.createElement("p");
+      none.textContent = "Nothing to clean up.";
+      list.append(none);
+    }
+    updateFooter();
+  }
+
+  async function load() {
+    trash.disabled = true;
+    say("Scanning…");
+    try {
+      items = await window.cleanup.scan(Number(days.value));
+      ticked.clear();
+      for (const item of items) if (item.ticked) ticked.add(item.id);
+      render();
+      say(`${items.length} item${items.length === 1 ? "" : "s"} found`);
+    } catch (error) {
+      say(`Could not scan: ${error.message}`, true);
+    }
+  }
+
+  trash.addEventListener("click", async () => {
+    trash.disabled = true;
+    say("Moving to Trash…");
+    try {
+      const result = await window.cleanup.trash([...ticked]);
+      if (result.cancelled) { say(""); updateFooter(); return; }
+      await load();
+      if (result.failed.length) {
+        say(`Moved ${result.moved.length}. Could not move ${result.failed.length}: ${result.failed[0].reason}`, true);
+      } else {
+        say(`Moved ${result.moved.length} to the Trash`);
+      }
+    } catch (error) {
+      say(`Could not move items: ${error.message}`, true);
+      updateFooter();
+    }
+  });
+  days.addEventListener("change", load);
+  load();
+</script>
+</body>
+</html>
