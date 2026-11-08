@@ -82,7 +82,7 @@ describePostgres("execution identity query contracts", () => {
       await db.update(heartbeatRuns).set(identity).where(eq(heartbeatRuns.id, row.id));
       return row;
     }
-    const startedAt = async (pid: number) => new Date(await readProcessStartedAt(pid));
+    const startedAt = async (pid: number) => new Date((await readProcessStartedAt(pid))!);
     const beforeStart = (at: Date) => new Date(at.getTime() - 86_400_000);
 
     it("does not let a process that reused the run's PID and group block the task", async () => {
